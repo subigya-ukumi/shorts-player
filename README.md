@@ -20,7 +20,7 @@ Video Stacker is a web application that allows users to upload two videos, previ
 
 1. Clone the repository:
    ```
-   git clone https://github.com/your-username/video-stacker.git
+   git clone https://github.com/subigya-ukumi/video-stacker.git
    cd video-stacker
    ```
 
