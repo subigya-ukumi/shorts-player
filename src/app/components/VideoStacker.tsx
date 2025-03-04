@@ -2,6 +2,7 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
 import React, { useEffect, useRef, useState } from 'react';
+import * as faceapi from 'face-api.js';
 
 const VideoStacker = () => {
   const [video1, setVideo1] = useState<File | null>(null);
@@ -11,27 +12,30 @@ const VideoStacker = () => {
   const [mergedVideoUrl, setMergedVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
+  const [faceDetectionReady, setFaceDetectionReady] = useState(false);
   const ffmpegRef = useRef(new FFmpeg());
+  const mergedVideoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
-    // Load FFmpeg
-    const loadFFmpeg = async () => {
+    const loadDependencies = async () => {
       try {
         await ffmpegRef.current.load();
+        await faceapi.nets.tinyFaceDetector.loadFromUri('/models');
+        setFaceDetectionReady(true);
       } catch (e) {
-        console.error('Error loading FFmpeg:', e);
-        setError('Failed to load FFmpeg. Video merging may not work.');
+        console.error('Error loading dependencies:', e);
+        setError('Failed to load dependencies. Video merging or face detection may not work.');
       }
     };
-    loadFFmpeg();
+    loadDependencies();
 
-    // Cleanup function to revoke object URLs
     return () => {
       if (video1Url) URL.revokeObjectURL(video1Url);
       if (video2Url) URL.revokeObjectURL(video2Url);
       if (mergedVideoUrl) URL.revokeObjectURL(mergedVideoUrl);
     };
-  }, [video1Url, video2Url, mergedVideoUrl]);
+  }, []);
 
   const handleVideoChange = (event: React.ChangeEvent<HTMLInputElement>, setVideo: React.Dispatch<React.SetStateAction<File | null>>, setVideoUrl: React.Dispatch<React.SetStateAction<string | null>>) => {
     const file = event.target.files?.[0];
@@ -94,9 +98,36 @@ const VideoStacker = () => {
     }
   };
 
+  const handleVideoPlay = async () => {
+    if (!faceDetectionReady || !mergedVideoRef.current || !canvasRef.current) return;
+
+    const video = mergedVideoRef.current;
+    const canvas = canvasRef.current;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    const detectFaces = async () => {
+      const detectFacesInterval = setInterval(async () => {
+        if (video.paused || video.ended) {
+          clearInterval(detectFacesInterval);
+          return;
+        }
+
+        const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions());
+        const displaySize = { width: video.videoWidth, height: video.videoHeight };
+        const resizedDetections = faceapi.resizeResults(detections, displaySize);
+        
+        canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
+        faceapi.draw.drawDetections(canvas, resizedDetections);
+      }, 100);
+    };
+
+    detectFaces();
+  };
+
   return (
     <div className='flex flex-col gap-5'>
-      <h1>Video Stacker</h1>
+      <h1>Video Stacker with Face Detection</h1>
       {error && <p style={{ color: 'red' }}>{error}</p>}
       <div className='flex gap-10'>
         <div className='flex flex-col gap-2'>
@@ -126,11 +157,30 @@ const VideoStacker = () => {
       </div>
       {mergedVideoUrl && (
         <div className='flex flex-col gap-2'>
-          <h2>Merged Video</h2>
-          <video controls width="300" className='border border-blue-500 roundemd-md'>
-            <source src={mergedVideoUrl} type="video/mp4" />
-            Your browser does not support the video tag.
-          </video>
+          <h2>Merged Video with Face Detection</h2>
+          <div style={{ position: 'relative', width: '300px' }}>
+            <video
+              ref={mergedVideoRef}
+              controls
+              width="300"
+              className='border border-blue-500 rounded-md'
+              onPlay={handleVideoPlay}
+            >
+              <source src={mergedVideoUrl} type="video/mp4" />
+              Your browser does not support the video tag.
+            </video>
+            <canvas
+              ref={canvasRef}
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                width: '100%',
+                height: '100%',
+                pointerEvents: 'none',
+              }}
+            />
+          </div>
           <div>
             <a href={mergedVideoUrl} download="merged_video.mp4" className='bg-blue-500 cursor-pointer py-2 px-4 text-sm w-auto text-white rounded-md'>Download Merged Video</a>
           </div>
