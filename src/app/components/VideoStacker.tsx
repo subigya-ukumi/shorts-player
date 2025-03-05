@@ -76,7 +76,7 @@ const VideoStacker = () => {
       await ffmpeg.exec([
         '-i', 'video1.mp4',
         '-i', 'video2.mp4',
-        '-filter_complex', '[0:v][1:v]vstack=inputs=2[v];[0:a][1:a]amerge[a]',
+        '-filter_complex', '[0:v][1:v]vstack=inputs=2[stacked];[stacked]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v];[0:a][1:a]amerge[a]',
         '-map', '[v]', '-map', '[a]',
         '-c:v', 'libx264',
         '-crf', '23',
