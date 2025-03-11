@@ -1,8 +1,8 @@
 "use client";
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
-import React, { useEffect, useRef, useState } from 'react';
 import * as faceapi from 'face-api.js';
+import React, { useEffect, useRef, useState } from 'react';
 
 const VideoStacker = () => {
   const [video1, setVideo1] = useState<File | null>(null);
@@ -72,11 +72,15 @@ const VideoStacker = () => {
       await ffmpeg.writeFile('video1.mp4', await fetchFile(video1));
       await ffmpeg.writeFile('video2.mp4', await fetchFile(video2));
 
-      // Execute FFmpeg command to stack videos vertically
+      // Process each video individually
+      await processVideo(ffmpeg, 'video1.mp4', 'processed1.mp4');
+      await processVideo(ffmpeg, 'video2.mp4', 'processed2.mp4');
+
+      // Stack the processed videos
       await ffmpeg.exec([
-        '-i', 'video1.mp4',
-        '-i', 'video2.mp4',
-        '-filter_complex', '[0:v][1:v]vstack=inputs=2[stacked];[stacked]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v];[0:a][1:a]amerge[a]',
+        '-i', 'processed1.mp4',
+        '-i', 'processed2.mp4',
+        '-filter_complex', '[0:v][1:v]vstack=inputs=2[v];[0:a][1:a]amerge[a]',
         '-map', '[v]', '-map', '[a]',
         '-c:v', 'libx264',
         '-crf', '23',
@@ -91,11 +95,96 @@ const VideoStacker = () => {
       setMergedVideoUrl(url);
 
     } catch (e) {
-      console.error('Error during video merging:', e);
-      setError('Failed to merge videos. Please try again.');
+      console.error('Error during video processing:', e);
+      setError('Failed to process videos. Please try again.');
     } finally {
       setProcessing(false);
     }
+  };
+
+  const processVideo = async (ffmpeg: FFmpeg, inputFile: string, outputFile: string) => {
+    // Create a temporary URL for face detection
+    const tempData = await ffmpeg.readFile(inputFile);
+    const tempBlob = new Blob([tempData], { type: 'video/mp4' });
+    const tempUrl = URL.createObjectURL(tempBlob);
+
+    // Get video dimensions and perform face detection
+    const { videoWidth, videoHeight, faceDetection } = await detectFaceInVideo(tempUrl);
+
+    // Clean up temporary URL
+    URL.revokeObjectURL(tempUrl);
+
+    if (!faceDetection) {
+      throw new Error(`Face detection failed for ${inputFile}`);
+    }
+
+    // Calculate crop dimensions
+    const { x, y, width, height } = calculateCropDimensions(faceDetection, videoWidth, videoHeight);
+
+    // Apply cropping and zooming using FFmpeg
+    await ffmpeg.exec([
+      '-i', inputFile,
+      '-filter:v', `crop=${width}:${height}:${x}:${y},scale=720:640`,
+      '-c:a', 'copy',
+      outputFile
+    ]);
+  };
+
+  const detectFaceInVideo = async (videoUrl: string): Promise<{ videoWidth: number, videoHeight: number, faceDetection: faceapi.FaceDetection | null }> => {
+    const video = document.createElement('video');
+    video.src = videoUrl;
+    await new Promise((resolve) => {
+      video.onloadedmetadata = () => {
+        video.width = video.videoWidth;
+        video.height = video.videoHeight;
+        resolve(null);
+      };
+    });
+
+    video.currentTime = 1; // Set to 1 second to ensure the video has loaded a frame
+    await new Promise((resolve) => {
+      video.onseeked = resolve;
+    });
+
+    const detection = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions());
+    return { videoWidth: video.width, videoHeight: video.height, faceDetection: detection || null };
+  };
+
+  const calculateCropDimensions = (
+    faceDetection: faceapi.FaceDetection,
+    videoWidth: number,
+    videoHeight: number
+  ) => {
+    const { x, y, width, height } = faceDetection.box;
+    const centerX = x + width / 2;
+    const centerY = y + height / 2;
+
+    // Calculate 2x face size
+    let cropWidth = width * 2.5;
+    let cropHeight = height * 2.5;
+
+    // Ensure crop doesn't exceed video boundaries
+    cropWidth = Math.min(cropWidth, videoWidth);
+    cropHeight = Math.min(cropHeight, videoHeight);
+
+    // Calculate crop coordinates
+    let cropX = Math.max(0, centerX - cropWidth / 2);
+    let cropY = Math.max(0, centerY - cropHeight / 2);
+
+    // Adjust if crop goes out of bounds
+    if (cropX + cropWidth > videoWidth) {
+      cropX = videoWidth - cropWidth;
+    }
+    if (cropY + cropHeight > videoHeight) {
+      cropY = videoHeight - cropHeight;
+    }
+
+    return {
+      x: Math.round(cropX),
+      y: Math.round(cropY),
+      width: Math.round(cropWidth),
+      height: Math.round(cropHeight)
+    };
   };
 
   const handleVideoPlay = async () => {
@@ -119,7 +208,9 @@ const VideoStacker = () => {
         
         canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
         faceapi.draw.drawDetections(canvas, resizedDetections);
-      }, 100);
+
+        console.log(`Faces detected: ${detections.length}`);
+      }, 100); // Changed from 100 to 1000 milliseconds
     };
 
     detectFaces();
