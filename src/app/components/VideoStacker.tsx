@@ -12,17 +12,14 @@ const VideoStacker = () => {
   const [mergedVideoUrl, setMergedVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
-  const [faceDetectionReady, setFaceDetectionReady] = useState(false);
   const ffmpegRef = useRef(new FFmpeg());
   const mergedVideoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     const loadDependencies = async () => {
       try {
         await ffmpegRef.current.load();
         await faceapi.nets.tinyFaceDetector.loadFromUri('/models');
-        setFaceDetectionReady(true);
       } catch (e) {
         console.error('Error loading dependencies:', e);
         setError('Failed to load dependencies. Video merging or face detection may not work.');
@@ -72,21 +69,8 @@ const VideoStacker = () => {
       await ffmpeg.writeFile('video1.mp4', await fetchFile(video1));
       await ffmpeg.writeFile('video2.mp4', await fetchFile(video2));
 
-      // Process each video individually
-      await processVideo(ffmpeg, 'video1.mp4', 'processed1.mp4');
-      await processVideo(ffmpeg, 'video2.mp4', 'processed2.mp4');
-
-      // Stack the processed videos
-      await ffmpeg.exec([
-        '-i', 'processed1.mp4',
-        '-i', 'processed2.mp4',
-        '-filter_complex', '[0:v][1:v]vstack=inputs=2[v];[0:a][1:a]amerge[a]',
-        '-map', '[v]', '-map', '[a]',
-        '-c:v', 'libx264',
-        '-crf', '23',
-        '-preset', 'veryfast',
-        'output.mp4'
-      ]);
+      // Process and merge videos
+      await mergeAndProcessVideos(ffmpeg, 'video1.mp4', 'video2.mp4', 'output.mp4');
 
       // Read the output file
       const data = await ffmpeg.readFile('output.mp4');
@@ -102,32 +86,41 @@ const VideoStacker = () => {
     }
   };
 
-  const processVideo = async (ffmpeg: FFmpeg, inputFile: string, outputFile: string) => {
-    // Create a temporary URL for face detection
+  const mergeAndProcessVideos = async (ffmpeg: FFmpeg, video1: string, video2: string, output: string) => {
+    const [dims1, dims2] = await Promise.all([
+      getFaceDimensions(ffmpeg, video1),
+      getFaceDimensions(ffmpeg, video2)
+    ]);
+
+    await ffmpeg.exec([
+      '-i', video1,
+      '-i', video2,
+      '-filter_complex',
+      `[0:v]crop=${dims1.width}:${dims1.height}:${dims1.x}:${dims1.y},scale=720:640[v1];` +
+      `[1:v]crop=${dims2.width}:${dims2.height}:${dims2.x}:${dims2.y},scale=720:640[v2];` +
+      '[v1][v2]vstack=inputs=2[v];[0:a][1:a]amerge[a]',
+      '-map', '[v]', '-map', '[a]',
+      '-c:v', 'libx264',
+      '-crf', '23',
+      '-preset', 'veryfast',
+      output
+    ]);
+  };
+
+  const getFaceDimensions = async (ffmpeg: FFmpeg, inputFile: string) => {
     const tempData = await ffmpeg.readFile(inputFile);
     const tempBlob = new Blob([tempData], { type: 'video/mp4' });
     const tempUrl = URL.createObjectURL(tempBlob);
 
-    // Get video dimensions and perform face detection
     const { videoWidth, videoHeight, faceDetection } = await detectFaceInVideo(tempUrl);
 
-    // Clean up temporary URL
     URL.revokeObjectURL(tempUrl);
 
     if (!faceDetection) {
       throw new Error(`Face detection failed for ${inputFile}`);
     }
 
-    // Calculate crop dimensions
-    const { x, y, width, height } = calculateCropDimensions(faceDetection, videoWidth, videoHeight);
-
-    // Apply cropping and zooming using FFmpeg
-    await ffmpeg.exec([
-      '-i', inputFile,
-      '-filter:v', `crop=${width}:${height}:${x}:${y},scale=720:640`,
-      '-c:a', 'copy',
-      outputFile
-    ]);
+    return calculateCropDimensions(faceDetection, videoWidth, videoHeight);
   };
 
   const detectFaceInVideo = async (videoUrl: string): Promise<{ videoWidth: number, videoHeight: number, faceDetection: faceapi.FaceDetection | null }> => {
@@ -141,7 +134,7 @@ const VideoStacker = () => {
       };
     });
 
-    video.currentTime = 1; // Set to 1 second to ensure the video has loaded a frame
+    video.currentTime = 0; // Process the first frame
     await new Promise((resolve) => {
       video.onseeked = resolve;
     });
@@ -187,35 +180,6 @@ const VideoStacker = () => {
     };
   };
 
-  const handleVideoPlay = async () => {
-    if (!faceDetectionReady || !mergedVideoRef.current || !canvasRef.current) return;
-
-    const video = mergedVideoRef.current;
-    const canvas = canvasRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-
-    const detectFaces = async () => {
-      const detectFacesInterval = setInterval(async () => {
-        if (video.paused || video.ended) {
-          clearInterval(detectFacesInterval);
-          return;
-        }
-
-        const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions());
-        const displaySize = { width: video.videoWidth, height: video.videoHeight };
-        const resizedDetections = faceapi.resizeResults(detections, displaySize);
-        
-        canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
-        faceapi.draw.drawDetections(canvas, resizedDetections);
-
-        console.log(`Faces detected: ${detections.length}`);
-      }, 100); // Changed from 100 to 1000 milliseconds
-    };
-
-    detectFaces();
-  };
-
   return (
     <div className='flex flex-col gap-5'>
       <h1>Video Stacker with Face Detection</h1>
@@ -255,22 +219,10 @@ const VideoStacker = () => {
               controls
               width="300"
               className='border border-blue-500 rounded-md'
-              onPlay={handleVideoPlay}
             >
               <source src={mergedVideoUrl} type="video/mp4" />
               Your browser does not support the video tag.
             </video>
-            <canvas
-              ref={canvasRef}
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                width: '100%',
-                height: '100%',
-                pointerEvents: 'none',
-              }}
-            />
           </div>
           <div>
             <a href={mergedVideoUrl} download="merged_video.mp4" className='bg-blue-500 cursor-pointer py-2 px-4 text-sm w-auto text-white rounded-md'>Download Merged Video</a>
